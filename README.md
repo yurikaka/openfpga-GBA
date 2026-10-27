@@ -23,7 +23,7 @@ You can change fast forward behavior with the "Fast Forward Render" setting in t
 
 ## RTC and Save Compatibility
 
-This branch adds experimental [SD ROM with matching cartridge Flash saves](docs/sd-rom-flash-save.md).
+This branch adds experimental [SD ROM with cartridge Flash saves (unchecked test mode)](docs/sd-rom-flash-save.md).
 
 NEW (0.8.0 and above): RTC timestamp is now saved as an external .rtc file next to the .sav. This should increase save compatibility with other cores and emulators since the .sav now presents as correctly sized. Downgrade flow is included so on updating to a version of the core with the new feature, the core should correctly update your saves as well.
 

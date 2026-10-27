@@ -231,9 +231,9 @@ assign port_ir_rx_disable = 1;
 assign bridge_endian_little = 0;
 
 // ---- Rumble driver (cart slot: DS Rumble Pak or GPIO rumble cart) ----
-// The boot probe owns the pins until its immutable backend decision. In
-// physical-save mode GPIO/RTC also goes directly to the matching cartridge.
-wire cart_decision_done, hybrid_cart_save, cart_probe_active, cart_probe_timeout;
+// Reserve the pins until the immutable backend decision. Test mode assumes
+// both ROM and cartridge use 128 KiB Flash; no cartridge ROM probe is performed.
+wire cart_decision_done, hybrid_cart_save;
 wire cart_bus_owns_pins = !cart_decision_done || hybrid_cart_save;
 wire cart_bus_owns_pins_74a;
 synch_3 cart_owner_sync(cart_bus_owns_pins, cart_bus_owns_pins_74a, clk_74a);
@@ -242,39 +242,29 @@ wire [31:0] cart_adapter_id;
 synch_3 cart_power_sync(cart_power, cart_power_s, clk_sys);
 synch_3 cart_adapter_sync(cart_adapter_id == 32'd0, native_cart_adapter_s, clk_sys);
 
-wire probe_cart_req;
-wire [27:0] probe_cart_addr;
 wire gba_cart_req, gba_cart_wr, cart_bus_done;
 wire [27:0] gba_cart_addr;
 wire [1:0] gba_cart_acc;
 wire [31:0] gba_cart_wdata, cart_bus_rdata;
-wire gba_cart_done = hybrid_cart_save && !cart_probe_active && cart_bus_done;
+wire gba_cart_done = hybrid_cart_save && cart_bus_done;
 wire [7:0] cart_bus_out1, cart_bus_out2, cart_bus_out3;
 wire cart_bus_dir1, cart_bus_dir2, cart_bus_dir3, cart_bus_dir30;
 wire [7:4] cart_bus_out0;
 wire cart_bus_out30, cart_bus_reset_release;
-wire rom_flash_64, rom_flash_128, rom_other_save;
 
 cart_save_selector save_selector (
     .clk(clk_sys), .reset(~pll_core_locked), .boot_ready(loader_drained),
+    .reset_exit(reset_n_s),
     .cart_power(cart_power_s), .native_adapter(native_cart_adapter_s),
-    .play_cartridge(1'b0), .rom_id(detected_cart_id), .rom_id_valid(det_cart_id_valid),
-    .rom_flash_64(rom_flash_64), .rom_flash_128(rom_flash_128), .rom_other_save(rom_other_save),
-    .probe_req(probe_cart_req), .probe_addr(probe_cart_addr),
-    .probe_response(cart_probe_active && cart_bus_done), .probe_rdata(cart_bus_rdata),
-    .probing(cart_probe_active), .decision_done(cart_decision_done),
-    .physical_id(), .physical_id_valid(), .use_cart_save(hybrid_cart_save),
-    .probe_timeout(cart_probe_timeout)
+    .decision_done(cart_decision_done), .use_cart_save(hybrid_cart_save)
 );
 
 gba_cart_bus cart_bus (
-    .clk(clk_sys), .reset(~pll_core_locked || cart_probe_timeout),
-    .cart_mode(cart_bus_owns_pins && cart_power_s && native_cart_adapter_s),
-    .req(cart_probe_active ? probe_cart_req : (hybrid_cart_save && gba_cart_req)),
-    .wr(cart_probe_active ? 1'b0 : gba_cart_wr),
-    .addr(cart_probe_active ? probe_cart_addr : gba_cart_addr),
-    .acc(cart_probe_active ? 2'b01 : gba_cart_acc),
-    .wdata(cart_probe_active ? 32'd0 : gba_cart_wdata),
+    .clk(clk_sys), .reset(~pll_core_locked),
+    .cart_mode(hybrid_cart_save && cart_power_s && native_cart_adapter_s),
+    .req(hybrid_cart_save && gba_cart_req),
+    .wr(gba_cart_wr), .addr(gba_cart_addr), .acc(gba_cart_acc),
+    .wdata(gba_cart_wdata),
     .rdata(cart_bus_rdata), .done(cart_bus_done), .busy(),
     .cart_tran_bank2(cart_tran_bank2), .cart_tran_bank2_out(cart_bus_out2), .cart_tran_bank2_dir(cart_bus_dir2),
     .cart_tran_bank3(cart_tran_bank3), .cart_tran_bank3_out(cart_bus_out3), .cart_tran_bank3_dir(cart_bus_dir3),
@@ -384,7 +374,7 @@ always @(posedge clk_74a) begin
         rumble_cs_n <= 1'b1;
         rumble_wr_n <= 1'b1;
     end
-    // Never issue upstream GPIO rumble writes while probing or using Flash.
+    // Never issue upstream GPIO rumble writes before selection or while using Flash.
     // Restart from a complete direction/data update when SD fallback is chosen.
     if (!pll_core_locked_s || cart_bus_owns_pins_74a) begin
         wr_busy <= 1'b0;
@@ -1058,12 +1048,6 @@ wire [24:0] max_rom_addr = (last_rom_byte_addr + 26'd2) >> 2;
 wire        det_flash_1m;
 wire [31:0] detected_cart_id;
 wire        det_cart_id_valid;
-
-save_signature_detector rom_signature (
-    .clk(clk_sys), .reset(~pll_core_locked), .word_valid(rom_loader_wr),
-    .word_data(rom_loader_data), .flash_64(rom_flash_64),
-    .flash_128(rom_flash_128), .other_save(rom_other_save)
-);
 
 save_type_detector save_det (
     .clk             ( clk_sys ),

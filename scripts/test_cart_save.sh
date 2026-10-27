@@ -16,9 +16,5 @@ run_test() {
     "$vvp_bin" "$test_dir/$name.vvp"
 }
 
-run_test save_signature_detector_tb src/fpga/core/save_signature_detector.sv
-run_test cart_save_selector_tb src/fpga/core/save_signature_detector.sv \
-    src/fpga/core/cart_save_selector.sv
+run_test cart_save_selector_tb src/fpga/core/cart_save_selector.sv
 run_test gba_cart_bus_tb src/fpga/core/gba_cart_bus.sv
-run_test cart_save_bus_tb src/fpga/core/save_signature_detector.sv \
-    src/fpga/core/cart_save_selector.sv src/fpga/core/gba_cart_bus.sv
