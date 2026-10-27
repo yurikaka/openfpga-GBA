@@ -92,11 +92,16 @@ wire gpio_space = latched_addr[27:24] == 4'h8 &&
                   latched_addr[23:0] <= 24'h0000C8;
 wire cart_write_enable = latched_wr && (eeprom_space || save_space || gpio_space);
 wire wr_n_pin = (state == ST_WRITE && cart_write_enable) ? wr_n : 1'b1;
-wire need_second_beat = latched_acc != ACCESS_8BIT && latched_acc != ACCESS_16BIT;
+// SRAM/Flash has an 8-bit bus: even a CPU word store is one byte write.
+wire need_second_beat = !save_space && latched_acc != ACCESS_8BIT && latched_acc != ACCESS_16BIT;
 wire transaction_active = state != ST_IDLE && state != ST_DONE;
 wire a_hi_drive = cart_mode && transaction_active && (!save_space || latched_wr);
 wire [7:0] save_data_in = cart_tran_bank1;
-wire [7:0] a_hi_pin_out = save_space ? latched_wdata[7:0] : a_hi_out;
+wire [1:0] save_byte_lane = (latched_acc == ACCESS_8BIT) ? 2'd0 :
+                           (latched_acc == ACCESS_16BIT) ? {1'b0, latched_addr[0]} :
+                                                         latched_addr[1:0];
+wire [7:0] save_write_data = latched_wdata[save_byte_lane * 8 +: 8];
+wire [7:0] a_hi_pin_out = save_space ? save_write_data : a_hi_out;
 assign busy = state != ST_IDLE;
 
 wire [15:0] write_word =

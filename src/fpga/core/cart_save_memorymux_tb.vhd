@@ -11,6 +11,7 @@ architecture test of cart_save_memorymux_tb is
     signal adr, dout, din : std_logic_vector(31 downto 0) := (others => '0');
     signal ena, rnw, done, cart_req, cart_wr, cart_done : std_logic := '0';
     signal acc, cart_acc : std_logic_vector(1 downto 0) := ACCESS_8BIT;
+    signal lowbits : std_logic_vector(1 downto 0) := "00";
     signal cart_addr : std_logic_vector(27 downto 0);
     signal cart_wdata : std_logic_vector(31 downto 0);
     signal cart_rdata : std_logic_vector(31 downto 0) := x"5A5A5A5A";
@@ -34,7 +35,7 @@ begin
         gb_bus_out => regs, mem_bus_Adr => adr, mem_bus_rnw => rnw,
         mem_bus_ena => ena, mem_bus_acc => acc, mem_bus_dout => dout,
         mem_bus_din => din, mem_bus_done => done, mem_bus_unread => open,
-        bus_lowbits => "00", dma_soon => '0', settle => open,
+        bus_lowbits => lowbits, dma_soon => '0', settle => open,
         save_eeprom => open, save_sram => open, save_flash => open,
         new_cycles => to_unsigned(0, 8), new_cycles_valid => '0', PC_in_BIOS => '1',
         lastread => x"00000000", lastread_dma => x"00000000", last_access_dma => '0',
@@ -65,7 +66,7 @@ begin
         procedure restart(constant backend : std_logic) is
         begin
             reset <= '1'; gb_on <= '0'; ss.rst <= '1'; ena <= '0'; cart_done <= '0';
-            physical <= backend;
+            physical <= backend; lowbits <= "00";
             for i in 1 to 4 loop tick; end loop;
             reset <= '0'; gb_on <= '1'; ss.rst <= '0';
             -- Prime the upstream address pipeline with a harmless BIOS read.
@@ -83,11 +84,17 @@ begin
         end;
         procedure physical_access(constant address, data, response, expected : std_logic_vector(31 downto 0);
                                   constant size : std_logic_vector(1 downto 0);
-                                  constant read_op : std_logic) is
+                                  constant read_op : std_logic;
+                                  constant original_lowbits : std_logic_vector(1 downto 0) := "00";
+                                  constant expected_address : std_logic_vector(31 downto 0) := x"00000000") is
+            variable target : std_logic_vector(31 downto 0);
         begin
+            target := address;
+            if expected_address /= x"00000000" then target := expected_address; end if;
+            lowbits <= original_lowbits;
             cart_rdata <= response;
             request(address, data, size, read_op);
-            assert cart_req = '1' and cart_addr = address(27 downto 0) and
+            assert cart_req = '1' and cart_addr = target(27 downto 0) and
                    cart_acc = size and cart_wr = not read_op and cart_wdata = data
                 report "physical request address/data/direction mismatch" severity failure;
             for i in 1 to 4 loop
@@ -110,8 +117,18 @@ begin
         physical_access(x"0E002AAA", x"00000055", x"00000000", x"00000000", ACCESS_8BIT, '0');
         physical_access(x"0E000000", x"00000000", x"A5A5A5A5", x"0000A5A5", ACCESS_16BIT, '1');
         physical_access(x"0E000000", x"00000000", x"12121212", x"12121212", ACCESS_32BIT, '1');
+        -- CPU LDM/STM presents an aligned address plus the original low bits.
+        physical_access(x"0E000120", x"00000000", x"12121212", x"12121212", ACCESS_32BIT, '1', "00", x"0E000120");
+        physical_access(x"0E000120", x"00000000", x"12121212", x"12121212", ACCESS_32BIT, '1', "01", x"0E000121");
+        physical_access(x"0E000120", x"00000000", x"12121212", x"12121212", ACCESS_32BIT, '1', "10", x"0E000122");
+        physical_access(x"0E000120", x"00000000", x"12121212", x"12121212", ACCESS_32BIT, '1', "11", x"0E000123");
+        physical_access(x"0F000120", x"44332211", x"00000000", x"00000000", ACCESS_32BIT, '0', "00", x"0F000120");
+        physical_access(x"0F000120", x"44332211", x"00000000", x"00000000", ACCESS_32BIT, '0', "01", x"0F000121");
+        physical_access(x"0F000120", x"44332211", x"00000000", x"00000000", ACCESS_32BIT, '0', "10", x"0F000122");
+        physical_access(x"0F000120", x"44332211", x"00000000", x"00000000", ACCESS_32BIT, '0', "11", x"0F000123");
+        physical_access(x"0E000121", x"00000000", x"12121212", x"12121212", ACCESS_32BIT, '1', "10", x"0E000123");
         physical_access(x"080000C5", x"00000000", x"00001234", x"00000012", ACCESS_8BIT, '1');
-        physical_access(x"080000C8", x"00000001", x"00000000", x"00000000", ACCESS_16BIT, '0');
+        physical_access(x"080000C8", x"00000001", x"00000000", x"00000000", ACCESS_16BIT, '0', "11");
 
         request(x"08000100", x"00000000", ACCESS_32BIT, '1');
         for i in 1 to 30 loop

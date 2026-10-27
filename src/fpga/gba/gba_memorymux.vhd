@@ -584,6 +584,8 @@ begin
                         when x"E" | x"F" =>
                            if (cartridge_save_mode = '1') then
                               cart_addr  <= adr_save;
+                              -- CPU block transfers carry their original low bits separately.
+                              cart_addr(1 downto 0) <= adr_save(1 downto 0) or bus_lowbits;
                               cart_acc   <= acc_save;
                               cart_wdata <= Dout_save;
                               cart_wr    <= '0';
@@ -656,6 +658,8 @@ begin
                         when x"E" | x"F" =>
                            if (cartridge_save_mode = '1') then
                               cart_addr  <= adr_save;
+                              -- CPU block transfers carry their original low bits separately.
+                              cart_addr(1 downto 0) <= adr_save(1 downto 0) or bus_lowbits;
                               cart_acc   <= acc_save;
                               cart_wdata <= Dout_save;
                               cart_wr    <= '1';

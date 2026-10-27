@@ -70,6 +70,35 @@ reg [7:0] save_drive_data = 8'hA5;
 wire save_read_active = cart_mode && !bank1_dir && (pin30 == 1'b0) && (bank0[5] == 1'b0);
 assign bank1 = save_read_active ? save_drive_data : 8'hzz;
 
+integer save_write_count = 0, save_read_count = 0;
+reg check_save_write = 0;
+reg [15:0] expected_save_addr;
+reg [7:0] expected_save_data;
+reg check_gpio_word = 0;
+integer gpio_write_count = 0;
+always @(negedge bank0[4]) begin
+    if (check_gpio_word && {bank1, bank2, bank3} !== (24'h62 + 24'(gpio_write_count)))
+        $fatal(1, "GPIO word store address mismatch");
+end
+always @(negedge bank0[6]) begin
+    if (cart_mode && pin30 === 1'b0) begin
+        save_write_count = save_write_count + 1;
+        if (check_save_write &&
+            ({bank2, bank3} !== expected_save_addr || bank1 !== expected_save_data ||
+             !bank1_dir || !bank2_dir || !bank3_dir || bank0[4] !== 1'b1))
+            $fatal(1, "save write pins: addr=%h data=%h expected=%h/%h",
+                   {bank2, bank3}, bank1, expected_save_addr, expected_save_data);
+    end
+    if (check_gpio_word) begin
+        if (pin30 !== 1'b1 || bank0[4] !== 1'b0 ||
+            {bank2, bank3} !== (gpio_write_count == 0 ? 16'h1122 : 16'h3344))
+            $fatal(1, "GPIO word store halfword mismatch");
+        gpio_write_count = gpio_write_count + 1;
+    end
+end
+always @(negedge bank0[5])
+    if (cart_mode && pin30 === 1'b0) save_read_count = save_read_count + 1;
+
 reg monitor_eeprom_write = 1'b0;
 reg eeprom_write_seen = 1'b0;
 reg eeprom_write_setup_seen = 1'b0;
@@ -102,7 +131,7 @@ always @(negedge bank0[5]) rom_read_seen = 1'b1;
 
 always @(posedge clk) begin
     #1;
-    if (cart_mode && busy && !rom_read_seen && pin30 === 1'b1 && bank0[4] === 1'b0 && bank0[5] === 1'b1) begin
+    if (cart_mode && !wr && busy && !rom_read_seen && pin30 === 1'b1 && bank0[4] === 1'b0 && bank0[5] === 1'b1) begin
         if (bank3_dir !== 1'b1 || bank2_dir !== 1'b1)
             $fatal(1, "ROM address bus released before RD# asserted");
     end
@@ -160,6 +189,27 @@ begin
 end
 endtask
 
+task automatic check_save_access(input [27:0] a, input [1:0] size, input [7:0] expected);
+    integer count_before;
+    begin
+        expected_save_addr = a[15:0];
+        expected_save_data = expected;
+        check_save_write = 1;
+        count_before = save_write_count;
+        pulse_req(1'b1, a, size, 32'h44332211);
+        check_save_write = 0;
+        if (save_write_count != count_before + 1)
+            $fatal(1, "save store size=%b address=%h produced %0d writes",
+                   size, a, save_write_count - count_before);
+        count_before = save_read_count;
+        pulse_req(1'b0, a, size, 32'd0);
+        if (save_read_count != count_before + 1 || rdata !== 32'hA5A5A5A5)
+            $fatal(1, "save read width/replication mismatch");
+    end
+endtask
+
+integer lane, mirror;
+reg [27:0] save_test_addr;
 initial begin
     repeat (2) @(posedge clk);
     if (bank3_dir !== 1'b0 || bank2_dir !== 1'b0 || pin30_dir !== 1'b0)
@@ -202,6 +252,27 @@ initial begin
         $fatal(1, "CS2 did not return high after save write");
     if (bank0[6] !== 1'b1)
         $fatal(1, "WR# did not return high after write");
+
+    // SRAM/Flash and its mirror: all widths and all address low-bit patterns.
+    for (mirror = 0; mirror < 2; mirror = mirror + 1) begin
+        for (lane = 0; lane < 4; lane = lane + 1) begin
+            save_test_addr = (mirror ? 28'hF000120 : 28'hE000120) + 28'(lane);
+            check_save_access(save_test_addr, 2'b00, 8'h11);
+            check_save_access(save_test_addr, 2'b01, (lane % 2) ? 8'h22 : 8'h11);
+            case (lane)
+                0: check_save_access(save_test_addr, 2'b10, 8'h11);
+                1: check_save_access(save_test_addr, 2'b10, 8'h22);
+                2: check_save_access(save_test_addr, 2'b10, 8'h33);
+                3: check_save_access(save_test_addr, 2'b10, 8'h44);
+            endcase
+        end
+    end
+
+    // A GPIO word store still needs two addressed halfword writes.
+    check_gpio_word = 1;
+    pulse_req(1'b1, 28'h80000C4, 2'b10, 32'h33441122);
+    check_gpio_word = 0;
+    if (gpio_write_count != 2) $fatal(1, "GPIO word store lost its second beat");
 
     eeprom_write_seen <= 1'b0;
     eeprom_write_setup_seen <= 1'b0;
