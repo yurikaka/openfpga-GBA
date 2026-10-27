@@ -231,6 +231,59 @@ assign port_ir_rx_disable = 1;
 assign bridge_endian_little = 0;
 
 // ---- Rumble driver (cart slot: DS Rumble Pak or GPIO rumble cart) ----
+// The boot probe owns the pins until its immutable backend decision. In
+// physical-save mode GPIO/RTC also goes directly to the matching cartridge.
+wire cart_decision_done, hybrid_cart_save, cart_probe_active, cart_probe_timeout;
+wire cart_bus_owns_pins = !cart_decision_done || hybrid_cart_save;
+wire cart_bus_owns_pins_74a;
+synch_3 cart_owner_sync(cart_bus_owns_pins, cart_bus_owns_pins_74a, clk_74a);
+wire cart_power, cart_power_s, native_cart_adapter_s;
+wire [31:0] cart_adapter_id;
+synch_3 cart_power_sync(cart_power, cart_power_s, clk_sys);
+synch_3 cart_adapter_sync(cart_adapter_id == 32'd0, native_cart_adapter_s, clk_sys);
+
+wire probe_cart_req;
+wire [27:0] probe_cart_addr;
+wire gba_cart_req, gba_cart_wr, cart_bus_done;
+wire [27:0] gba_cart_addr;
+wire [1:0] gba_cart_acc;
+wire [31:0] gba_cart_wdata, cart_bus_rdata;
+wire gba_cart_done = hybrid_cart_save && !cart_probe_active && cart_bus_done;
+wire [7:0] cart_bus_out1, cart_bus_out2, cart_bus_out3;
+wire cart_bus_dir1, cart_bus_dir2, cart_bus_dir3, cart_bus_dir30;
+wire [7:4] cart_bus_out0;
+wire cart_bus_out30, cart_bus_reset_release;
+wire rom_flash_64, rom_flash_128, rom_other_save;
+
+cart_save_selector save_selector (
+    .clk(clk_sys), .reset(~pll_core_locked), .boot_ready(loader_drained),
+    .cart_power(cart_power_s), .native_adapter(native_cart_adapter_s),
+    .play_cartridge(1'b0), .rom_id(detected_cart_id), .rom_id_valid(det_cart_id_valid),
+    .rom_flash_64(rom_flash_64), .rom_flash_128(rom_flash_128), .rom_other_save(rom_other_save),
+    .probe_req(probe_cart_req), .probe_addr(probe_cart_addr),
+    .probe_response(cart_probe_active && cart_bus_done), .probe_rdata(cart_bus_rdata),
+    .probing(cart_probe_active), .decision_done(cart_decision_done),
+    .physical_id(), .physical_id_valid(), .use_cart_save(hybrid_cart_save),
+    .probe_timeout(cart_probe_timeout)
+);
+
+gba_cart_bus cart_bus (
+    .clk(clk_sys), .reset(~pll_core_locked || cart_probe_timeout),
+    .cart_mode(cart_bus_owns_pins && cart_power_s && native_cart_adapter_s),
+    .req(cart_probe_active ? probe_cart_req : (hybrid_cart_save && gba_cart_req)),
+    .wr(cart_probe_active ? 1'b0 : gba_cart_wr),
+    .addr(cart_probe_active ? probe_cart_addr : gba_cart_addr),
+    .acc(cart_probe_active ? 2'b01 : gba_cart_acc),
+    .wdata(cart_probe_active ? 32'd0 : gba_cart_wdata),
+    .rdata(cart_bus_rdata), .done(cart_bus_done), .busy(),
+    .cart_tran_bank2(cart_tran_bank2), .cart_tran_bank2_out(cart_bus_out2), .cart_tran_bank2_dir(cart_bus_dir2),
+    .cart_tran_bank3(cart_tran_bank3), .cart_tran_bank3_out(cart_bus_out3), .cart_tran_bank3_dir(cart_bus_dir3),
+    .cart_tran_bank1(cart_tran_bank1), .cart_tran_bank1_out(cart_bus_out1), .cart_tran_bank1_dir(cart_bus_dir1),
+    .cart_tran_bank0(cart_bus_out0), .cart_tran_bank0_dir(),
+    .cart_tran_pin30(cart_bus_out30), .cart_tran_pin30_dir(cart_bus_dir30),
+    .cart_pin30_pwroff_reset(cart_bus_reset_release), .cart_tran_pin31(), .cart_tran_pin31_dir()
+);
+
 // Pin map:
 //   bank3[7:0] = AD[7:0]
 //   bank2[7:0] = AD[15:8]
@@ -331,20 +384,30 @@ always @(posedge clk_74a) begin
         rumble_cs_n <= 1'b1;
         rumble_wr_n <= 1'b1;
     end
+    // Never issue upstream GPIO rumble writes while probing or using Flash.
+    // Restart from a complete direction/data update when SD fallback is chosen.
+    if (!pll_core_locked_s || cart_bus_owns_pins_74a) begin
+        wr_busy <= 1'b0;
+        wr_cnt <= 7'd0;
+        wr_data_phase <= 1'b0;
+        refresh_due <= 1'b1;
+        rumble_cs_n <= 1'b1;
+        rumble_wr_n <= 1'b1;
+    end
 end
 
-assign cart_tran_bank3     = rumble_ad[7:0];
-assign cart_tran_bank3_dir = 1'b1;
-assign cart_tran_bank2     = rumble_ad[15:8];
-assign cart_tran_bank2_dir = 1'b1;
-assign cart_tran_bank1     = 8'h00;                 // A[23:16] = 0 (80000xxh)
-assign cart_tran_bank1_dir = 1'b1;
+assign cart_tran_bank3     = cart_bus_owns_pins ? (cart_bus_dir3 ? cart_bus_out3 : 8'hzz) : rumble_ad[7:0];
+assign cart_tran_bank3_dir = cart_bus_owns_pins ? cart_bus_dir3 : 1'b1;
+assign cart_tran_bank2     = cart_bus_owns_pins ? (cart_bus_dir2 ? cart_bus_out2 : 8'hzz) : rumble_ad[15:8];
+assign cart_tran_bank2_dir = cart_bus_owns_pins ? cart_bus_dir2 : 1'b1;
+assign cart_tran_bank1     = cart_bus_owns_pins ? (cart_bus_dir1 ? cart_bus_out1 : 8'hzz) : 8'h00;
+assign cart_tran_bank1_dir = cart_bus_owns_pins ? cart_bus_dir1 : 1'b1;
 // bank0[7]=PHI=0, [6]=/WR, [5]=/RD=1, [4]=/CS
-assign cart_tran_bank0     = {1'b0, rumble_wr_n, 1'b1, rumble_cs_n};
+assign cart_tran_bank0     = cart_bus_owns_pins ? cart_bus_out0 : {1'b0, rumble_wr_n, 1'b1, rumble_cs_n};
 assign cart_tran_bank0_dir = 1'b1;
-assign cart_tran_pin30 = 1'b0;                      // /CS2: left to Pocket hardware (template default)
-assign cart_tran_pin30_dir = 1'bz;
-assign cart_pin30_pwroff_reset = 1'b0;
+assign cart_tran_pin30 = cart_bus_owns_pins ? (cart_bus_dir30 ? cart_bus_out30 : 1'bz) : 1'b0;
+assign cart_tran_pin30_dir = cart_bus_owns_pins ? cart_bus_dir30 : 1'bz;
+assign cart_pin30_pwroff_reset = cart_bus_owns_pins ? cart_bus_reset_release : 1'b0;
 assign cart_tran_pin31 = 1'bz;
 assign cart_tran_pin31_dir = 1'b0;
 
@@ -996,6 +1059,12 @@ wire        det_flash_1m;
 wire [31:0] detected_cart_id;
 wire        det_cart_id_valid;
 
+save_signature_detector rom_signature (
+    .clk(clk_sys), .reset(~pll_core_locked), .word_valid(rom_loader_wr),
+    .word_data(rom_loader_data), .flash_64(rom_flash_64),
+    .flash_128(rom_flash_128), .other_save(rom_other_save)
+);
+
 save_type_detector save_det (
     .clk             ( clk_sys ),
     .reset           ( ~pll_core_locked ),
@@ -1073,7 +1142,8 @@ wire        rtc_inuse;
 // Save size in clk_sys domain (cart save only, excludes RTC bytes)
 // sram_quirk games may still use EEPROM for saves (e.g. Dragon Ball Z titles),
 // so use the default 64 KB to ensure EEPROM data is persisted.
-wire [23:0] save_size_sys = det_flash_1m  ? 24'h02_0000 :  // 128 KB
+wire [23:0] save_size_sys = hybrid_cart_save ? 24'd0 :
+                              det_flash_1m  ? 24'h02_0000 :  // 128 KB
                                             24'h01_0000;   // 64 KB
 
 // Track whether OS has sent RTC epoch time (0x0090 arrives AFTER 0x008F/allcomplete)
@@ -1163,7 +1233,8 @@ synch_3 s_reset_n(reset_n, reset_n_s, clk_sys);
 wire core_reset_s;
 synch_3 s_core_reset(core_reset, core_reset_s, clk_sys);
 
-wire reset_gba = ~pll_core_locked | ~dataslot_allcomplete_s | ~reset_n_s | core_reset_s | ~save_mem_ready;
+wire reset_gba = ~pll_core_locked | ~dataslot_allcomplete_s | ~reset_n_s | core_reset_s |
+                 ~cart_decision_done | (~save_mem_ready & ~hybrid_cart_save);
 
 // ---- BIOS Loading via shared ingress → gba_top internal BRAM ----
 // BIOS (16 KB) loads from data slot 4 at address 0x3xxxxxxx
@@ -1271,7 +1342,10 @@ wire    [31:0]  rtc_date_bcd;
 wire    [31:0]  rtc_time_bcd;
 wire            rtc_valid;
 
-wire            savestate_supported = 1;
+wire hybrid_cart_save_74a, cart_decision_done_74a;
+synch_3 cart_save_sync(hybrid_cart_save, hybrid_cart_save_74a, clk_74a);
+synch_3 cart_decision_sync(cart_decision_done, cart_decision_done_74a, clk_74a);
+wire            savestate_supported = cart_decision_done_74a && !hybrid_cart_save_74a;
 wire    [31:0]  savestate_addr = 32'h40000000;
 wire    [31:0]  savestate_size = 32'h60D18;       // 0x18346 addr-units × 4 bytes
 wire    [31:0]  savestate_maxloadsize = 32'h60D18;
@@ -1358,6 +1432,9 @@ core_bridge_cmd icb (
     .rtc_date_bcd           ( rtc_date_bcd ),
     .rtc_time_bcd           ( rtc_time_bcd ),
     .rtc_valid              ( rtc_valid ),
+    .cart_play              (),
+    .cart_power             ( cart_power ),
+    .cart_adapter_id        ( cart_adapter_id ),
 
     .savestate_supported    ( savestate_supported ),
     .savestate_addr         ( savestate_addr ),
@@ -1459,8 +1536,9 @@ synch_3 rtc_quirk_sync (
 // but many (e.g. Dragon Ball Z titles) use EEPROM at 0xD for actual saves.
 // bus_out FSM packs save bytes densely (1 byte per PSRAM byte), so these
 // sizes match the actual save type sizes. RTC is a separate fixed-size slot.
-wire        rtc_active = rtc_quirk_s | force_rtc;
-wire [31:0] save_size_bytes = flash_1m_s ? 32'h0002_0000 : 32'h0001_0000;
+wire        rtc_active = (rtc_quirk_s | force_rtc) & ~hybrid_cart_save_74a;
+wire [31:0] save_size_bytes = hybrid_cart_save_74a ? 32'd0 :
+                            flash_1m_s ? 32'h0002_0000 : 32'h0001_0000;
 wire [31:0] rtc_size_bytes = rtc_active ? 32'd16 : 32'd0;
 
 // Continuously drive datatable port A with save size.
@@ -1735,9 +1813,17 @@ gba_top #(
     .CyclesVsyncSpeed    (),
     .SramFlashEnable     ( ~quirk_sram ),
     .memory_remap        ( quirk_memory_remap ),
+    .cartridge_save_mode ( hybrid_cart_save ),
+    .cart_req            ( gba_cart_req ),
+    .cart_wr             ( gba_cart_wr ),
+    .cart_addr           ( gba_cart_addr ),
+    .cart_acc            ( gba_cart_acc ),
+    .cart_wdata          ( gba_cart_wdata ),
+    .cart_rdata          ( cart_bus_rdata ),
+    .cart_done           ( gba_cart_done ),
     .increaseSSHeaderCount(1'b0),
-    .save_state          ( ss_save ),
-    .load_state          ( ss_load ),
+    .save_state          ( hybrid_cart_save ? 1'b0 : ss_save ),
+    .load_state          ( hybrid_cart_save ? 1'b0 : ss_load ),
     .maxpixels           ( quirk_sprite ),
     .specialmodule       ( quirk_gpio | force_rtc_s ),
     .Rumble              ( cart_rumble ),

@@ -75,6 +75,14 @@ entity gba_memorymux is
       MaxPakAddr           : in     std_logic_vector(24 downto 0);
       SramFlashEnable      : in     std_logic;
       memory_remap         : in     std_logic;
+      cartridge_save_mode  : in     std_logic := '0';
+      cart_req             : out    std_logic := '0';
+      cart_wr              : out    std_logic := '0';
+      cart_addr            : out    std_logic_vector(27 downto 0) := (others => '0');
+      cart_acc             : out    std_logic_vector(1 downto 0) := (others => '0');
+      cart_wdata           : out    std_logic_vector(31 downto 0) := (others => '0');
+      cart_rdata           : in     std_logic_vector(31 downto 0) := (others => '0');
+      cart_done            : in     std_logic := '0';
       
       bitmapdrawmode       : in     std_logic;
                                     
@@ -147,6 +155,7 @@ architecture arch of gba_memorymux is
       READ_UNREADABLE,
       ROTATE,
       READ_GPIO,
+      CART_WAIT,
 
       WRITE_WRAMLARGE,
       WRITE_WRAMSMALL,
@@ -423,6 +432,7 @@ begin
          tilt_y <= to_unsigned(16#3A0# + to_integer(AnalogTiltY), 12);
 
          -- default pulse regs
+         cart_req         <= '0';
          bus_out_ena      <= '0';
          gb_bus_out.ena   <= '0';
          
@@ -537,7 +547,15 @@ begin
                            state         <= READOAMRAM;
 
                         when x"8" | x"9" | x"A" | x"B" | x"C" =>
-                           if (unsigned(adr_save(24 downto 2)) >= unsigned(MaxPakAddr)) then
+                           if (cartridge_save_mode = '1' and specialmodule = '1' and
+                               unsigned(adr_save) >= 16#80000C4# and unsigned(adr_save) <= 16#80000C8#) then
+                              cart_addr  <= adr_save;
+                              cart_acc   <= acc_save;
+                              cart_wdata <= Dout_save;
+                              cart_wr    <= '0';
+                              cart_req   <= '1';
+                              state      <= CART_WAIT;
+                           elsif (unsigned(adr_save(24 downto 2)) >= unsigned(MaxPakAddr)) then
                               state       <= READAFTERPAK;
                            -- GPIO registers only replace ROM data once the game sets the read-enable bit (0x80000C8 bit 0)
                            elsif (specialmodule = '1' and GPIO_readable = '1' and unsigned(adr_save) >= 16#80000C4# and unsigned(adr_save) <= 16#80000C8#) then
@@ -564,7 +582,14 @@ begin
                            state            <= EEPROMREAD;
 
                         when x"E" | x"F" =>
-                           if (SramFlashEnable = '1') then
+                           if (cartridge_save_mode = '1') then
+                              cart_addr  <= adr_save;
+                              cart_acc   <= acc_save;
+                              cart_wdata <= Dout_save;
+                              cart_wr    <= '0';
+                              cart_req   <= '1';
+                              state      <= CART_WAIT;
+                           elsif (SramFlashEnable = '1') then
                               state                <= FLASHREAD;
                               adr_save(1 downto 0) <= adr_save(1 downto 0) or bus_lowbits;
                               if (acc_save = ACCESS_16BIT and (adr_save(0) or bus_lowbits(0)) = '1') then
@@ -610,7 +635,16 @@ begin
                         when x"8" =>
                            mem_bus_done <= '1';
                            state        <= IDLE;
-                           if (specialmodule = '1') then
+                           if (cartridge_save_mode = '1' and specialmodule = '1' and
+                               unsigned(adr_save) >= 16#80000C4# and unsigned(adr_save) <= 16#80000C8#) then
+                              cart_addr  <= adr_save;
+                              cart_acc   <= acc_save;
+                              cart_wdata <= Dout_save;
+                              cart_wr    <= '1';
+                              cart_req   <= '1';
+                              mem_bus_done <= '0';
+                              state      <= CART_WAIT;
+                           elsif (specialmodule = '1') then
                               if (unsigned(adr_save) >= 16#80000C4# and unsigned(adr_save) <= 16#80000C8#) then
                                  GPIO_writeEna <= '1';
                                  GPIO_addr     <= std_logic_vector(to_unsigned(to_integer(unsigned(adr_save(3 downto 1))) - 4 / 2, 2));
@@ -619,7 +653,18 @@ begin
                            end if;
 
                         when x"D" => state <= EEPROMWRITE;
-                        when x"E" | x"F" => state <= FLASHSRAMWRITEDECIDE1; adr_save(1 downto 0) <= adr_save(1 downto 0) or bus_lowbits;
+                        when x"E" | x"F" =>
+                           if (cartridge_save_mode = '1') then
+                              cart_addr  <= adr_save;
+                              cart_acc   <= acc_save;
+                              cart_wdata <= Dout_save;
+                              cart_wr    <= '1';
+                              cart_req   <= '1';
+                              state      <= CART_WAIT;
+                           else
+                              state <= FLASHSRAMWRITEDECIDE1;
+                              adr_save(1 downto 0) <= adr_save(1 downto 0) or bus_lowbits;
+                           end if;
                         when others => mem_bus_done <= '1'; state <= IDLE;
                      end case;
 
@@ -890,6 +935,27 @@ begin
                mem_bus_unread <= unread_next;
                state <= IDLE;
                
+            when CART_WAIT =>
+               if (cart_done = '1') then
+                  -- Bus data is already addressed, unlike the aligned ROM
+                  -- cache containers. Flash bytes are repeated in all lanes.
+                  if (read_operation = '1') then
+                     if (acc_save = ACCESS_8BIT) then
+                        if (adr_save(0) = '0') then
+                           mem_bus_din <= x"000000" & cart_rdata(7 downto 0);
+                        else
+                           mem_bus_din <= x"000000" & cart_rdata(15 downto 8);
+                        end if;
+                     elsif (acc_save = ACCESS_16BIT) then
+                        mem_bus_din <= x"0000" & cart_rdata(15 downto 0);
+                     else
+                        mem_bus_din <= cart_rdata;
+                     end if;
+                  end if;
+                  mem_bus_done <= '1';
+                  state <= IDLE;
+               end if;
+
             when READ_GPIO =>
                if (GPIO_done = '1') then
                   mem_bus_done <= '1';
