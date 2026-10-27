@@ -1,0 +1,61 @@
+name: Build Pocket package
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feat/cartridge-support]
+    paths:
+      - .github/workflows/build-pocket-package.yml
+      - scripts/package_pocket.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pocket-package-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compile
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p build_output
+          docker run --rm -v "$GITHUB_WORKSPACE:/build" -w /build \
+            raetro/quartus:21.1 quartus_sh -t generate.tcl \
+            2>&1 | tee build_output/quartus.log
+
+      - name: Reverse bitstream
+        run: |
+          python3 scripts/reverse_bitstream.py \
+            src/fpga/build/output_files/ap_core.rbf \
+            pkg/Cores/mincer_ray.GBA/bitstream.rbf_r
+
+      - name: Package for Pocket
+        run: python3 scripts/package_pocket.py
+
+      - name: Upload install package
+        uses: actions/upload-artifact@v4
+        with:
+          name: pocket-package-${{ github.sha }}
+          path: build_output/packages/*
+          if-no-files-found: error
+
+      - name: Upload build and timing reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pocket-reports-${{ github.sha }}
+          path: |
+            build_output/quartus.log
+            build_output/reports/
+            src/fpga/build/output_files/*.summary
+            src/fpga/build/output_files/*.rpt
+          if-no-files-found: warn
